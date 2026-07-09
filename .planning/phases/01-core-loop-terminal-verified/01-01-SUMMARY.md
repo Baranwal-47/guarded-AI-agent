@@ -118,3 +118,7 @@ None - no external service configuration required.
 ---
 *Phase: 01-core-loop-terminal-verified*
 *Completed: 2026-07-09*
+
+## Self-Check: PASSED
+
+All 7 created files found on disk; both task commits (`090ca03`, `39f2593`) found in git log.
