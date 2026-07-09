@@ -14,9 +14,9 @@ from policy_engine import Action, PolicyContext, evaluate, load_rules
 
 
 class ToolExecutionGateway:
-    def __init__(self, mcp_manager: MCPManager, rules_path: str) -> None:
+    def __init__(self, mcp_manager: MCPManager, session_factory) -> None:
         self.mcp_manager = mcp_manager
-        self.rules_path = rules_path
+        self.session_factory = session_factory
 
     async def execute_tool(
         self,
@@ -35,7 +35,8 @@ class ToolExecutionGateway:
         )
 
         try:
-            rules = load_rules(self.rules_path)  # fresh read every call, no cache
+            async with self.session_factory() as session:
+                rules = await load_rules(session)  # fresh read every call, no cache
             decision = evaluate(ctx, rules)
         except Exception as exc:  # noqa: BLE001 - policy engine failure must fail closed, never ALLOW
             reason = f"policy engine error (fail-closed DENY): {exc}"
