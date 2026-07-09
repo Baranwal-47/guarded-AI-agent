@@ -51,10 +51,13 @@ class AgentLoop:
             print(f"[STEP {step}]")
 
             calls = self.gemini_client.function_calls(response)
+            # Always persist the model's own turn, whether it's a tool call or a
+            # final text answer — omitting it here left back-to-back "user" turns
+            # in history with no assistant turn between them, which confused
+            # later generate() calls (bug found during Task 3 live verification).
+            contents.append(response.candidates[0].content)
             if not calls:
                 return self.gemini_client.text(response), contents
-
-            contents.append(response.candidates[0].content)
 
             response_parts = []
             for call in calls:
@@ -75,5 +78,6 @@ class AgentLoop:
         # the turn always terminates (D-11, AGENT-01).
         tool = self.gemini_client.build_tools(self.tool_provider.list_all_tools())
         final_response = self.gemini_client.generate(contents, tool)
+        contents.append(final_response.candidates[0].content)
         final_text = self.gemini_client.text(final_response) or "[capped: max steps reached without a final answer]"
         return final_text, contents
