@@ -1,19 +1,23 @@
 """Policy Engine — the real security boundary.
 
-Pure module: evaluate(context, rules) -> PolicyDecision. No MCP, no DB, no
-side effects, no I/O beyond load_rules() reading the rules file. Consumes
-only structured tool-call facts (PolicyContext) — never the model's free
-text (POLICY-01 / Pitfall 5).
+Pure module: evaluate(context, rules) -> PolicyDecision. No MCP, side
+effects, or I/O beyond load_rules() reading rules. Consumes only structured
+tool-call facts (PolicyContext) — never the model's free text (POLICY-01 /
+Pitfall 5).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import yaml
+from sqlalchemy import select
+
+from models import PolicyRule
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 
 class Action(Enum):
@@ -58,23 +62,23 @@ class Rule:
     enabled: bool
 
 
-def load_rules(path: str) -> list[Rule]:
-    """Read rules fresh from YAML on every call — no cache/lru_cache.
+async def load_rules(session: "AsyncSession") -> list[Rule]:
+    """Read rules fresh from the DB on every call — no cache/lru_cache.
 
     Rule content can change live (dashboard, Phase 2); this module must
     never memoize it (Pitfall 8 / T-01-02-STALE).
     """
-    data = yaml.safe_load(Path(path).read_text()) or {}
+    result = await session.execute(select(PolicyRule))
     return [
         Rule(
-            id=r["id"],
-            rule_type=r["rule_type"],
-            tool_name=r["tool_name"],
-            condition=r.get("condition") or {},
-            action=Action[r["action"]],
-            enabled=r.get("enabled", True),
+            id=row.id,
+            rule_type=row.rule_type,
+            tool_name=row.tool_name,
+            condition=row.condition or {},
+            action=Action[row.action],
+            enabled=row.enabled,
         )
-        for r in data.get("rules", [])
+        for row in result.scalars()
     ]
 
 

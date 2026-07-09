@@ -68,13 +68,28 @@ def test_edited_rule_changes_next_evaluation_no_cache(tmp_path):
     async def _run():
         await _create_all(engine)
         async with session_factory() as session:
+            # Two rules both match delete_file (require_approval rule_type
+            # always matches on tool_name); DENY beats ALLOW by fixed
+            # precedence while both are enabled, revealing the ALLOW rule
+            # underneath once DENY is disabled — proves evaluate() actually
+            # re-reduces over freshly-read rules, not a stale cached list.
             session.add(
                 PolicyRule(
                     id="R-DENY",
-                    rule_type="block_tool",
+                    rule_type="require_approval",
                     tool_name="delete_file",
                     condition={},
                     action="DENY",
+                    enabled=True,
+                )
+            )
+            session.add(
+                PolicyRule(
+                    id="R-ALLOW",
+                    rule_type="require_approval",
+                    tool_name="delete_file",
+                    condition={},
+                    action="ALLOW",
                     enabled=True,
                 )
             )
@@ -99,7 +114,7 @@ def test_edited_rule_changes_next_evaluation_no_cache(tmp_path):
 
             rules_after = await load_rules(session)
             decision_after = evaluate(ctx, rules_after)
-            assert decision_after.action is not Action.DENY
+            assert decision_after.action is Action.ALLOW
 
     asyncio.run(_run())
 
