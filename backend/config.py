@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     max_agent_steps: int = 10
     policy_rules_path: str = "policy_rules.yaml"
     database_url: str = "sqlite+aiosqlite:///./guarded_agent.db"
+    approval_timeout_seconds: int = 300
 
 
 @lru_cache
