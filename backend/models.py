@@ -1,8 +1,6 @@
-"""Conversation, Message, Policy, PolicyRule, ApprovalRequest ORM models
-(SQLAlchemy 2.0 declarative style).
-
-ToolExecution, AuditLog are added by later plans in this phase, each adding
-the models its own slice needs — not here.
+"""Conversation, Message, Policy, PolicyRule, ApprovalRequest, ToolExecution,
+AuditLog ORM models (SQLAlchemy 2.0 declarative style) — the full seven-table
+schema for this phase.
 """
 
 from datetime import datetime
@@ -79,3 +77,40 @@ class ApprovalRequest(Base):
     decided_by: Mapped[str | None] = mapped_column(default=None)
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
     decided_at: Mapped[datetime | None] = mapped_column(default=None)
+
+
+class ToolExecution(Base):
+    """The durable record of one gateway.execute_tool() call — request,
+    policy decision, and result — written on every branch (DENY,
+    approval-denied, ALLOW/executed), replacing the Phase 1
+    [POLICY]/[RESULT] prints (T-02-12). `flagged_prompt_injection` is a
+    logging-only sibling column (SEC-02) — it is set by gateway's
+    scan_for_prompt_injection() and never fed back into PolicyContext."""
+
+    __tablename__ = "tool_executions"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid4()))
+    conversation_id: Mapped[str | None] = mapped_column(default=None)
+    tool_name: Mapped[str]
+    arguments: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    decision_action: Mapped[str]
+    decision_reason: Mapped[str]
+    matched_rule_ids: Mapped[list[str]] = mapped_column(JSON, default=list)
+    result_ok: Mapped[bool | None] = mapped_column(default=None)
+    result_error: Mapped[str | None] = mapped_column(default=None)
+    flagged_prompt_injection: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+
+
+class AuditLog(Base):
+    """Event-level audit trail entry. `flags` carries the literal string
+    "PROMPT_INJECTION_SUSPECTED" when scan_for_prompt_injection() matches —
+    null otherwise."""
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid4()))
+    event: Mapped[str]
+    detail: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    flags: Mapped[str | None] = mapped_column(default=None)
+    created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
