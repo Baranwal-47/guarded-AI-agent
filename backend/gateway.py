@@ -198,13 +198,23 @@ class ToolExecutionGateway:
 
         if decision.action is Action.REQUIRE_APPROVAL:
             request_id = str(uuid4())
-            await self._persist_approval_request(request_id, tool_name, arguments, decision.reason)
+            # Register the Future BEFORE persisting the PENDING row: the row is
+            # what makes this request_id decidable (POST /approvals/{id} or the
+            # timer can win try_decide()'s race the instant the row commits), so
+            # the Future must already exist first — otherwise a decision landing
+            # between persist and register calls wake() on an unknown id and is
+            # silently dropped (ApprovalManager.wake() no-ops on unknown ids),
+            # hanging this request forever. register() is synchronous — no
+            # await happens between it and persisting, so there's no window.
             fut = self.approval_manager.register(request_id)
-            timer_task = asyncio.create_task(self._auto_deny(request_id, self.timeout_seconds))
             try:
-                outcome = await fut
+                await self._persist_approval_request(request_id, tool_name, arguments, decision.reason)
+                timer_task = asyncio.create_task(self._auto_deny(request_id, self.timeout_seconds))
+                try:
+                    outcome = await fut
+                finally:
+                    timer_task.cancel()  # no-op if the timer already fired and exited
             finally:
-                timer_task.cancel()  # no-op if the timer already fired and exited
                 self.approval_manager.discard(request_id)
             if outcome != "approve":
                 result = ToolResult(ok=False, content=None, error="denied (human or timeout)")
