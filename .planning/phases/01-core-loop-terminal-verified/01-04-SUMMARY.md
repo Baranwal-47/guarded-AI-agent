@@ -104,3 +104,7 @@ None - no external service configuration required. This plan's test suite runs e
 ---
 *Phase: 01-core-loop-terminal-verified*
 *Completed: 2026-07-09*
+
+## Self-Check: PASSED
+
+All 3 created files (`backend/gemini_client.py`, `backend/gateway.py`, `backend/test_gateway.py`) plus this SUMMARY.md verified present on disk; all 3 commits (`d5c6ab7`, `323bfcd`, `4ec3aba`) verified in `git log`.
