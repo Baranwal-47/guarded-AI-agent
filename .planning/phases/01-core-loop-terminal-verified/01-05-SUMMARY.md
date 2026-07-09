@@ -121,4 +121,6 @@ A terminal agent (`backend/main.py`) that runs a Gemini ReAct loop over two live
 *Phase: 01-core-loop-terminal-verified*
 *Completed (Tasks 1-2 only): 2026-07-09*
 
-## Self-Check: PENDING
+## Self-Check: PASSED
+
+Both created files (`backend/agent_loop.py`, `backend/main.py`) plus this SUMMARY.md verified present on disk; all 3 commits (`97f36e6`, `fe75a78`, `4575a5e`) verified in `git log`.
