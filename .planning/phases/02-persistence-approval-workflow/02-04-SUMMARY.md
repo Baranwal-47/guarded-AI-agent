@@ -95,3 +95,7 @@ None - no external service configuration required.
 ---
 *Phase: 02-persistence-approval-workflow*
 *Completed: 2026-07-09*
+
+## Self-Check: PASSED
+
+All created/modified files (backend/test_audit.py, backend/models.py, backend/gateway.py, this SUMMARY.md) confirmed present on disk; task commits eac5193, 97d8585, and metadata commit cecd890 confirmed in git log.
