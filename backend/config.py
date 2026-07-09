@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     gemini_model: str = "gemini-2.5-flash"
     max_agent_steps: int = 10
     policy_rules_path: str = "policy_rules.yaml"
+    database_url: str = "sqlite+aiosqlite:///./guarded_agent.db"
 
 
 @lru_cache
