@@ -30,7 +30,12 @@ from sqlalchemy import select
 async def _load_or_create_conversation() -> tuple[list, str]:
     """Eager-load the single ongoing conversation's full history into a
     `contents` list, entirely inside one session scope (Pitfall 5 — no lazy
-    relationship traversal, no access after the session closes)."""
+    relationship traversal, no access after the session closes).
+
+    # ponytail: history is loaded in full, unbounded — accepted per T-02-02
+    # (single-user localhost, one ongoing conversation, growth bounded by
+    # manual use). Add pagination/truncation if this ever stops holding.
+    """
     async with async_session() as session:
         conversation = (await session.execute(select(Conversation))).scalars().first()
         if conversation is None:
