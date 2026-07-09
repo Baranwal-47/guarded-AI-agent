@@ -117,3 +117,7 @@ A real `GEMINI_API_KEY` must be set in `backend/.env` before plan 01-05 (agent l
 ---
 *Phase: 01-core-loop-terminal-verified*
 *Completed: 2026-07-09*
+
+## Self-Check: PASSED
+
+All 3 created files (`backend/schema_sanitizer.py`, `backend/mcp_manager.py`, `backend/test_discovery.py`) plus this SUMMARY.md verified present on disk; all 4 commits (`6ef77ee`, `a1520c8`, `4d97cf8`, `afce255`) verified in `git log`.
