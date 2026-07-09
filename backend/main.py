@@ -13,7 +13,9 @@ working on Windows (Pitfall 1).
 """
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
+import yaml
 from agent_loop import AgentLoop, ToolCatalog
 from config import get_settings
 from db import async_session, init_models
@@ -22,9 +24,35 @@ from gateway import ToolExecutionGateway
 from gemini_client import GeminiClient
 from google.genai import types
 from mcp_manager import MCPManager
-from models import Conversation, Message
+from models import Conversation, Message, PolicyRule
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
+
+
+async def _seed_policy_rules_if_empty(rules_path: str) -> None:
+    """One-time migration: populate the policy_rules table from the YAML
+    seed file the first time the table is empty. Rules live in the DB from
+    then on (POLICY-04) — this never runs again once rows exist."""
+    async with async_session() as session:
+        count = (await session.execute(select(func.count()).select_from(PolicyRule))).scalar_one()
+        if count:
+            return
+
+        data = yaml.safe_load(Path(rules_path).read_text()) or {}
+        rules = data.get("rules", [])
+        for r in rules:
+            session.add(
+                PolicyRule(
+                    id=r["id"],
+                    rule_type=r["rule_type"],
+                    tool_name=r["tool_name"],
+                    condition=r.get("condition") or {},
+                    action=r["action"],
+                    enabled=r.get("enabled", True),
+                )
+            )
+        await session.commit()
+        print(f"[STARTUP] seeded {len(rules)} policy rules")
 
 
 async def _load_or_create_conversation() -> tuple[list, str]:
@@ -56,6 +84,7 @@ async def _load_or_create_conversation() -> tuple[list, str]:
 async def lifespan(app: FastAPI):
     settings = get_settings()
     await init_models()
+    await _seed_policy_rules_if_empty(settings.policy_rules_path)
 
     mcp_manager = MCPManager()
     await mcp_manager.connect_all()
@@ -64,7 +93,7 @@ async def lifespan(app: FastAPI):
         gemini_client = GeminiClient(settings.gemini_api_key, settings.gemini_model)
         # The Gateway is the ONE component that legitimately holds the manager's
         # privileged execute capability.
-        gateway = ToolExecutionGateway(mcp_manager, settings.policy_rules_path)
+        gateway = ToolExecutionGateway(mcp_manager, async_session)
         # The Agent Loop receives only this read-only facade — never mcp_manager.
         catalog = ToolCatalog(mcp_manager)
         agent_loop = AgentLoop(gemini_client, gateway, tool_provider=catalog, max_steps=settings.max_agent_steps)

@@ -3,8 +3,15 @@
 Covers every bullet in 01-02-PLAN.md Task 2 <behavior>.
 """
 
+import asyncio
 import dataclasses
+from pathlib import Path
 
+import yaml
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from db import Base
+from models import PolicyRule
 from policy_engine import Action, PolicyContext, Rule, evaluate, load_rules
 
 
@@ -139,8 +146,36 @@ def test_disabled_rule_never_matches():
     assert decision.action != Action.ALLOW
 
 
-def test_load_rules_reads_seed_yaml_and_conflict_resolves_to_deny():
-    rules = load_rules("policy_rules.yaml")
+def test_load_rules_reads_seed_yaml_and_conflict_resolves_to_deny(tmp_path):
+    # 02-02: load_rules is now async and DB-sourced, not YAML/path-sourced.
+    # Seed a throwaway DB from the same policy_rules.yaml the real startup
+    # seed step reads, mirroring main.py's _seed_policy_rules_if_empty, to
+    # prove the seed data's own R01/R03 conflict still resolves to DENY.
+    yaml_path = Path(__file__).parent.parent / "policy_rules.yaml"
+    data = yaml.safe_load(yaml_path.read_text()) or {}
+
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/seed-test.db")
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+
+    async def _run():
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        async with session_factory() as session:
+            for r in data.get("rules", []):
+                session.add(
+                    PolicyRule(
+                        id=r["id"],
+                        rule_type=r["rule_type"],
+                        tool_name=r["tool_name"],
+                        condition=r.get("condition") or {},
+                        action=r["action"],
+                        enabled=r.get("enabled", True),
+                    )
+                )
+            await session.commit()
+            return await load_rules(session)
+
+    rules = asyncio.run(_run())
     decision = evaluate(make_ctx(tool_name="delete_file", server_name="sandbox-file-manager"), rules)
     assert decision.action == Action.DENY
     assert len(decision.matched_rule_ids) >= 2

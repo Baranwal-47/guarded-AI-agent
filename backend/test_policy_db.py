@@ -7,12 +7,6 @@ Uses a throwaway SQLite file under `tmp_path` with its own engine/sessionmaker
 
 import asyncio
 import inspect
-import os
-
-# db.py binds its engine to get_settings().database_url at import time, which
-# requires GEMINI_API_KEY (no default) — set a dummy value before the first
-# import, same pattern test_main.py uses via monkeypatch.setenv (02-01).
-os.environ.setdefault("GEMINI_API_KEY", "test-key")
 
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
