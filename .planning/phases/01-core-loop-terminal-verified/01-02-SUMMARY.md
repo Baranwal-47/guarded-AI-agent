@@ -135,3 +135,7 @@ None - no external service configuration required. (`GEMINI_API_KEY` is document
 ---
 *Phase: 01-core-loop-terminal-verified*
 *Completed: 2026-07-09*
+
+## Self-Check: PASSED
+
+All 7 created files verified present on disk; all 3 task commits (`6e60b46`, `d1dff8d`, `114d598`) verified in `git log`.
