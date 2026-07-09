@@ -14,13 +14,15 @@ working on Windows (Pitfall 1).
 
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from agent_loop import AgentLoop, ToolCatalog
+from approval_manager import ApprovalManager
 from config import get_settings
 from db import async_session, init_models
 from fastapi import FastAPI
-from gateway import ToolExecutionGateway
+from gateway import ToolExecutionGateway, reconcile_pending_approvals, try_decide
 from gemini_client import GeminiClient
 from google.genai import types
 from mcp_manager import MCPManager
@@ -80,20 +82,34 @@ async def _load_or_create_conversation() -> tuple[list, str]:
         return contents, conversation.id
 
 
+async def _reconcile_startup_approvals() -> None:
+    """APPROVAL-03: any approval_requests row still PENDING from a prior
+    process has no surviving Future/timer — deny every orphan fail-closed
+    before the app accepts /chat or /approvals traffic (RESEARCH Pattern 4)."""
+    async with async_session() as session:
+        reconciled = await reconcile_pending_approvals(session)
+        if reconciled:
+            print(f"[STARTUP] reconciled {reconciled} orphaned PENDING approval(s) -> DENIED (fail-closed)")
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
     await init_models()
     await _seed_policy_rules_if_empty(settings.policy_rules_path)
+    await _reconcile_startup_approvals()
 
     mcp_manager = MCPManager()
     await mcp_manager.connect_all()
 
     try:
         gemini_client = GeminiClient(settings.gemini_api_key, settings.gemini_model)
+        approval_manager = ApprovalManager()
         # The Gateway is the ONE component that legitimately holds the manager's
         # privileged execute capability.
-        gateway = ToolExecutionGateway(mcp_manager, async_session)
+        gateway = ToolExecutionGateway(
+            mcp_manager, async_session, approval_manager, timeout_seconds=settings.approval_timeout_seconds
+        )
         # The Agent Loop receives only this read-only facade — never mcp_manager.
         catalog = ToolCatalog(mcp_manager)
         agent_loop = AgentLoop(gemini_client, gateway, tool_provider=catalog, max_steps=settings.max_agent_steps)
@@ -104,6 +120,8 @@ async def lifespan(app: FastAPI):
         app.state.agent_loop = agent_loop
         app.state.contents = contents
         app.state.conversation_id = conversation_id
+        # Shared with POST /approvals/{id} — same instance the gateway blocks on.
+        app.state.approval_manager = approval_manager
 
         yield
     finally:
@@ -115,6 +133,10 @@ app = FastAPI(lifespan=lifespan)
 
 class ChatRequest(BaseModel):
     message: str
+
+
+class ApprovalDecision(BaseModel):
+    decision: Literal["approve", "reject"]
 
 
 async def _persist_message(conversation_id: str, role: str, content: str) -> None:
@@ -138,3 +160,17 @@ async def chat(body: ChatRequest) -> dict:
     await _persist_message(app.state.conversation_id, "model", final_text)
 
     return {"final_text": final_text}
+
+
+@app.post("/approvals/{request_id}")
+async def resolve_approval(request_id: str, body: ApprovalDecision) -> dict:
+    """Resolve a pending REQUIRE_APPROVAL tool call (APPROVAL-02). The
+    conditional UPDATE...WHERE status='PENDING' in try_decide() is the sole
+    arbiter — ok=False means the request was already decided (by the
+    auto-deny timer or an earlier POST), a no-op, not an error."""
+    new_status = "APPROVED" if body.decision == "approve" else "DENIED"
+    async with async_session() as session:
+        won = await try_decide(session, request_id, new_status, "human")
+    if won:
+        app.state.approval_manager.wake(request_id, body.decision)
+    return {"ok": won}

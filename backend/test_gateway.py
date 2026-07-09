@@ -6,9 +6,14 @@ async surface under test and stdlib asyncio already covers running it -
 no new test dependency needed (ponytail: stdlib solves it).
 
 Rules now live in a throwaway SQLite DB (tmp_path) instead of a YAML file
-(02-02: gateway takes a session_factory, not a rules_path) — same
+(02-02: gateway takes a session_factory, not a rules_path) - same
 R-DENY/R-APPROVE/R-ALLOW-READ shapes as before, just inserted as PolicyRule
 rows instead of written as YAML text.
+
+02-03: the REQUIRE_APPROVAL branch no longer prompts on the terminal - it
+blocks on an ApprovalManager-registered Future. Tests use a FakeApprovalManager
+whose register() returns an already-resolved Future (PATTERNS.md test
+guidance), preserving the exact prior fail-closed/executes assertions.
 """
 
 import asyncio
@@ -17,6 +22,7 @@ import inspect
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from approval_manager import ApprovalManager
 from db import Base
 from gateway import ToolExecutionGateway
 from mcp_manager import ToolResult
@@ -71,6 +77,13 @@ def fake_manager():
     return FakeMCPManager()
 
 
+@pytest.fixture
+def approval_manager():
+    """Real ApprovalManager for branches that never reach REQUIRE_APPROVAL
+    (DENY/ALLOW/exception tests) - constructed but never exercised there."""
+    return ApprovalManager()
+
+
 class FakeMCPManager:
     """Records call() invocations; never touches a real MCP transport."""
 
@@ -80,6 +93,27 @@ class FakeMCPManager:
     async def call(self, tool_name: str, arguments: dict) -> ToolResult:
         self.calls.append((tool_name, arguments))
         return ToolResult(ok=True, content="fake-content", error=None)
+
+
+class FakeApprovalManager:
+    """register() returns an already-resolved Future carrying `decision` -
+    mirrors ApprovalManager's interface with no real POST/timeout round-trip
+    (PATTERNS.md: "fake ApprovalManager.register to return an
+    already-resolved future")."""
+
+    def __init__(self, decision: str) -> None:
+        self.decision = decision
+
+    def register(self, request_id: str) -> asyncio.Future:
+        fut = asyncio.get_running_loop().create_future()
+        fut.set_result(self.decision)
+        return fut
+
+    def wake(self, request_id: str, decision: str) -> None:  # pragma: no cover - never called (pre-resolved)
+        pass
+
+    def discard(self, request_id: str) -> None:
+        pass
 
 
 def _run(gateway, tool_name):
@@ -94,8 +128,8 @@ def _run(gateway, tool_name):
     )
 
 
-def test_deny_rule_blocks_call_and_returns_synthesized_tool_result(fake_manager, session_factory):
-    gateway = ToolExecutionGateway(fake_manager, session_factory)
+def test_deny_rule_blocks_call_and_returns_synthesized_tool_result(fake_manager, session_factory, approval_manager):
+    gateway = ToolExecutionGateway(fake_manager, session_factory, approval_manager)
     result = _run(gateway, "delete_file")
     assert fake_manager.calls == []
     assert isinstance(result, ToolResult)
@@ -104,9 +138,8 @@ def test_deny_rule_blocks_call_and_returns_synthesized_tool_result(fake_manager,
     assert result.error is not None
 
 
-def test_require_approval_rejected_input_fails_closed(fake_manager, session_factory, monkeypatch):
-    monkeypatch.setattr("builtins.input", lambda prompt="": "n")
-    gateway = ToolExecutionGateway(fake_manager, session_factory)
+def test_require_approval_rejected_decision_fails_closed(fake_manager, session_factory):
+    gateway = ToolExecutionGateway(fake_manager, session_factory, FakeApprovalManager("reject"))
     result = _run(gateway, "write_file")
     assert fake_manager.calls == []
     assert result.ok is False
@@ -114,29 +147,28 @@ def test_require_approval_rejected_input_fails_closed(fake_manager, session_fact
     assert result.error is not None
 
 
-def test_require_approval_invalid_empty_input_fails_closed(fake_manager, session_factory, monkeypatch):
-    monkeypatch.setattr("builtins.input", lambda prompt="": "")
-    gateway = ToolExecutionGateway(fake_manager, session_factory)
+def test_require_approval_garbage_decision_fails_closed(fake_manager, session_factory):
+    # Anything other than exactly "approve" fails closed - not just "reject".
+    gateway = ToolExecutionGateway(fake_manager, session_factory, FakeApprovalManager(""))
     result = _run(gateway, "write_file")
     assert fake_manager.calls == []
     assert result.ok is False
 
 
-def test_require_approval_affirmative_input_executes(fake_manager, session_factory, monkeypatch):
-    monkeypatch.setattr("builtins.input", lambda prompt="": "y")
-    gateway = ToolExecutionGateway(fake_manager, session_factory)
+def test_require_approval_affirmative_decision_executes(fake_manager, session_factory):
+    gateway = ToolExecutionGateway(fake_manager, session_factory, FakeApprovalManager("approve"))
     result = _run(gateway, "write_file")
     assert fake_manager.calls == [("write_file", {"path": "x"})]
     assert result.ok is True
     assert result.content == "fake-content"
 
 
-def test_policy_exception_fails_closed_no_mcp_call(fake_manager, session_factory, monkeypatch):
+def test_policy_exception_fails_closed_no_mcp_call(fake_manager, session_factory, approval_manager, monkeypatch):
     def _raise(ctx, rules):
         raise RuntimeError("boom")
 
     monkeypatch.setattr("gateway.evaluate", _raise)
-    gateway = ToolExecutionGateway(fake_manager, session_factory)
+    gateway = ToolExecutionGateway(fake_manager, session_factory, approval_manager)
     result = _run(gateway, "write_file")
     assert fake_manager.calls == []
     assert result.ok is False
@@ -144,7 +176,7 @@ def test_policy_exception_fails_closed_no_mcp_call(fake_manager, session_factory
     assert result.error is not None
 
 
-def test_allow_path_calls_mcp_and_returns_manager_result(fake_manager, tmp_path):
+def test_allow_path_calls_mcp_and_returns_manager_result(fake_manager, tmp_path, approval_manager):
     # A tool with its own real, enabled ALLOW rule genuinely exercises the
     # ALLOW branch (read_file has no rule in DEFAULT_RULES, which would instead
     # hit the fail-closed no-match-DENY default, not ALLOW).
@@ -161,7 +193,7 @@ def test_allow_path_calls_mcp_and_returns_manager_result(fake_manager, tmp_path)
             }
         ],
     )
-    gateway = ToolExecutionGateway(fake_manager, allow_session_factory)
+    gateway = ToolExecutionGateway(fake_manager, allow_session_factory, approval_manager)
     result = _run(gateway, "read_file")
     assert fake_manager.calls == [("read_file", {"path": "x"})]
     assert isinstance(result, ToolResult)
