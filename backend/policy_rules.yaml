@@ -1,0 +1,83 @@
+# Seed policy rules for Phase 1 (Policy Engine).
+# Shape mirrors the eventual Phase 2 `policy_rules` DB table (D-04) so the
+# Phase 2 swap is a data-source change (load_rules reads DB instead of this
+# file), not a rewrite of evaluate()'s rule-consumption shape.
+#
+# Rule types: block_tool, require_approval, input_validation, token_budget.
+# input_validation condition: {prefix: "<required-prefix>", arg: "<argument-name>"}
+#   -> matches (i.e. is "restrictive") when the named argument does NOT start
+#      with prefix.
+# token_budget condition: {max_tokens: <int>}
+#   -> matches when current_token_usage >= max_tokens.
+#
+# DELIBERATE CONFLICT (D-06): rules R01 and R03 both match `delete_file` with
+# different actions (DENY vs REQUIRE_APPROVAL) — precedence must resolve to
+# DENY, proving fixed-precedence reduction rather than first-match.
+
+rules:
+  # --- block_tool (2) ---
+  - id: R01
+    rule_type: block_tool
+    tool_name: delete_file
+    condition: {}
+    action: DENY
+    enabled: true
+
+  - id: R02
+    rule_type: block_tool
+    tool_name: move_file
+    condition: {}
+    action: DENY
+    enabled: true
+
+  # --- require_approval (3) ---
+  - id: R03
+    rule_type: require_approval
+    tool_name: delete_file
+    condition: {}
+    action: REQUIRE_APPROVAL
+    enabled: true
+
+  - id: R04
+    rule_type: require_approval
+    tool_name: write_file
+    condition: {}
+    action: REQUIRE_APPROVAL
+    enabled: true
+
+  - id: R05
+    rule_type: require_approval
+    tool_name: query-docs
+    condition: {}
+    action: REQUIRE_APPROVAL
+    enabled: true
+
+  # --- input_validation (2) ---
+  - id: R06
+    rule_type: input_validation
+    tool_name: write_file
+    condition: {prefix: "reports/", arg: "path"}
+    action: DENY
+    enabled: true
+
+  - id: R07
+    rule_type: input_validation
+    tool_name: read_file
+    condition: {prefix: "public/", arg: "path"}
+    action: REQUIRE_APPROVAL
+    enabled: true
+
+  # --- token_budget (2) ---
+  - id: R08
+    rule_type: token_budget
+    tool_name: resolve-library-id
+    condition: {max_tokens: 50000}
+    action: REQUIRE_APPROVAL
+    enabled: true
+
+  - id: R09
+    rule_type: token_budget
+    tool_name: query-docs
+    condition: {max_tokens: 80000}
+    action: DENY
+    enabled: true

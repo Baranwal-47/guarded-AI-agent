@@ -1,0 +1,24 @@
+[project]
+name = "guarded-ai-backend"
+version = "0.1.0"
+description = "Guarded AI Agent backend: Gemini tool-use loop, MCP manager, policy engine, tool execution gateway"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=1.28,<2",
+    "google-genai",
+    "fastapi",
+    "uvicorn[standard]",
+    "sqlalchemy>=2.0",
+    "aiosqlite",
+    "pydantic-settings",
+    "websockets",
+    "pyyaml",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+]
+
+[tool.uv]
+package = false
