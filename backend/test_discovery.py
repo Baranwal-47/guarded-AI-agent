@@ -5,8 +5,10 @@ sanitizer tests, or `uv run python test_discovery.py` for the live discovery
 script that connects to both real MCP servers (network + subprocess required).
 """
 
+import asyncio
 import copy
 import logging
+import sys
 
 from schema_sanitizer import sanitize_schema
 
@@ -85,3 +87,61 @@ def test_sanitize_warns_on_stripped_pattern_and_default(caplog):
     messages = "\n".join(r.message for r in caplog.records)
     assert "pattern" in messages
     assert "default" in messages
+
+
+async def main() -> int:
+    """Live discovery + round-trip script: `uv run python test_discovery.py`.
+
+    Connects to both real MCP servers, proves the tool->server registry is
+    built entirely from live tools/list (no hardcoded names), proves
+    server_for() resolves a known tool, round-trips one real call, and
+    confirms a path-escaping call returns a structured error, not an
+    exception.
+    """
+    from mcp_manager import MCPManager
+
+    manager = MCPManager()
+    try:
+        await manager.connect_all()
+
+        tools = manager.list_all_tools()
+        tool_names = sorted(t["name"] for t in tools)
+        print(f"[discover] {len(tool_names)} tools from both servers: {tool_names}")
+
+        sandbox_expected = {"list_files", "read_file", "write_file", "move_file", "delete_file"}
+        discovered_sandbox = {n for n in tool_names if n in sandbox_expected}
+        if discovered_sandbox != sandbox_expected:
+            print(f"FAIL: expected sandbox tools {sandbox_expected}, got {discovered_sandbox}")
+            return 1
+        context7_tools = {n for n in tool_names if n not in sandbox_expected}
+        if not context7_tools:
+            print("FAIL: no Context7 tools discovered")
+            return 1
+        print(f"PASS: sandbox tools {sorted(discovered_sandbox)} + Context7 tools {sorted(context7_tools)}")
+
+        server = manager.server_for("read_file")
+        if server != "sandbox":
+            print(f"FAIL: server_for('read_file') returned {server!r}, expected 'sandbox'")
+            return 1
+        print("PASS: server_for('read_file') == 'sandbox' (resolved from live registry)")
+
+        ok_result = await manager.call("read_file", {"path": "notes.txt"})
+        if not ok_result.ok:
+            print(f"FAIL: call('read_file', notes.txt) returned ok=False: {ok_result.error}")
+            return 1
+        print(f"PASS: call('read_file', notes.txt) -> ok=True, content={ok_result.content!r}")
+
+        err_result = await manager.call("read_file", {"path": "../server.py"})
+        if err_result.ok or not err_result.error or "outside the sandbox root" not in err_result.error:
+            print(f"FAIL: escaping call did not return a structured error: {err_result!r}")
+            return 1
+        print(f"PASS: call('read_file', ../server.py) -> ok=False, error={err_result.error!r}")
+    finally:
+        await manager.aclose()
+
+    print("ALL PASS")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))
