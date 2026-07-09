@@ -21,9 +21,33 @@ from uuid import uuid4
 
 from approval_manager import ApprovalManager
 from mcp_manager import MCPManager, ToolResult
-from models import ApprovalRequest
+from models import ApprovalRequest, AuditLog, ToolExecution
 from policy_engine import Action, PolicyContext, evaluate, load_rules
 from sqlalchemy import func, update
+
+# SEC-02/D-06/D-07: case-insensitive substring scan against read/external-content
+# tool output only. Logging-only signal — see scan_for_prompt_injection's docstring
+# and policy_engine.PolicyContext's docstring for the invariant this must never cross.
+_SUSPICIOUS_PHRASES = (
+    "ignore previous instructions",
+    "ignore all previous instructions",  # matches SANDBOX-03's actual fixture wording verbatim (Pitfall 1)
+    "ignore all prior",
+    "disregard the above",
+    "you must now",
+    "new instructions:",
+)
+
+_SCANNED_TOOLS = {"read_file", "list_files", "query-docs", "resolve-library-id"}  # D-07
+
+
+def scan_for_prompt_injection(tool_name: str, content: str | None) -> bool:
+    """Logging-only heuristic (SEC-02). NEVER pass this result into
+    PolicyContext/evaluate() — that would reopen the free-text bypass
+    policy_engine.py's own docstring warns against (POLICY-01)."""
+    if tool_name not in _SCANNED_TOOLS or not content:
+        return False
+    lowered = content.lower()
+    return any(phrase in lowered for phrase in _SUSPICIOUS_PHRASES)
 
 
 async def try_decide(session, request_id: str, new_status: str, decided_by: str) -> bool:
@@ -76,6 +100,46 @@ class ToolExecutionGateway:
             )
             await session.commit()
 
+    async def _persist_tool_execution(
+        self,
+        *,
+        conversation_id: str,
+        tool_name: str,
+        arguments: dict,
+        decision_action: str,
+        decision_reason: str,
+        matched_rule_ids: list[str],
+        result: ToolResult,
+        flagged: bool,
+    ) -> None:
+        """Write the tool_executions row for this branch (and an audit_logs
+        entry when flagged) — the durable replacement for the old
+        [POLICY]/[RESULT] prints (T-02-12). Called on every branch: DENY,
+        approval-denied, and ALLOW/executed."""
+        async with self.session_factory() as session:
+            session.add(
+                ToolExecution(
+                    conversation_id=conversation_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    decision_action=decision_action,
+                    decision_reason=decision_reason,
+                    matched_rule_ids=matched_rule_ids,
+                    result_ok=result.ok,
+                    result_error=result.error,
+                    flagged_prompt_injection=flagged,
+                )
+            )
+            if flagged:
+                session.add(
+                    AuditLog(
+                        event="tool_execution",
+                        detail={"tool_name": tool_name, "arguments": arguments},
+                        flags="PROMPT_INJECTION_SUSPECTED",
+                    )
+                )
+            await session.commit()
+
     async def _auto_deny(self, request_id: str, timeout: float) -> None:
         await asyncio.sleep(timeout)
         async with self.session_factory() as session:
@@ -105,20 +169,35 @@ class ToolExecutionGateway:
             decision = evaluate(ctx, rules)
         except Exception as exc:  # noqa: BLE001 - policy engine failure must fail closed, never ALLOW
             reason = f"policy engine error (fail-closed DENY): {exc}"
-            print(f"[POLICY] DENY reason={reason!r} matched_rule_ids=[]")
-            return ToolResult(ok=False, content=None, error=reason)
-
-        print(
-            f"[POLICY] {decision.action.value} reason={decision.reason!r} "
-            f"matched_rule_ids={decision.matched_rule_ids}"
-        )
+            result = ToolResult(ok=False, content=None, error=reason)
+            await self._persist_tool_execution(
+                conversation_id=conversation_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                decision_action=Action.DENY.value,
+                decision_reason=reason,
+                matched_rule_ids=[],
+                result=result,
+                flagged=False,
+            )
+            return result
 
         if decision.action is Action.DENY:
-            return ToolResult(ok=False, content=None, error=decision.reason)
+            result = ToolResult(ok=False, content=None, error=decision.reason)
+            await self._persist_tool_execution(
+                conversation_id=conversation_id,
+                tool_name=tool_name,
+                arguments=arguments,
+                decision_action=decision.action.value,
+                decision_reason=decision.reason,
+                matched_rule_ids=decision.matched_rule_ids,
+                result=result,
+                flagged=False,
+            )
+            return result
 
         if decision.action is Action.REQUIRE_APPROVAL:
             request_id = str(uuid4())
-            print(f"[APPROVAL] pending id={request_id} tool={tool_name!r} args={arguments!r} reason={decision.reason!r}")
             await self._persist_approval_request(request_id, tool_name, arguments, decision.reason)
             fut = self.approval_manager.register(request_id)
             timer_task = asyncio.create_task(self._auto_deny(request_id, self.timeout_seconds))
@@ -128,10 +207,29 @@ class ToolExecutionGateway:
                 timer_task.cancel()  # no-op if the timer already fired and exited
                 self.approval_manager.discard(request_id)
             if outcome != "approve":
-                reason = "denied (human or timeout)"
-                print(f"[RESULT] {reason}")
-                return ToolResult(ok=False, content=None, error=reason)
+                result = ToolResult(ok=False, content=None, error="denied (human or timeout)")
+                await self._persist_tool_execution(
+                    conversation_id=conversation_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    decision_action=decision.action.value,
+                    decision_reason=decision.reason,
+                    matched_rule_ids=decision.matched_rule_ids,
+                    result=result,
+                    flagged=False,
+                )
+                return result
 
         result = await self.mcp_manager.call(tool_name, arguments)
-        print(f"[RESULT] ok={result.ok} error={result.error!r}")
+        flagged = scan_for_prompt_injection(tool_name, result.content)
+        await self._persist_tool_execution(
+            conversation_id=conversation_id,
+            tool_name=tool_name,
+            arguments=arguments,
+            decision_action=decision.action.value,
+            decision_reason=decision.reason,
+            matched_rule_ids=decision.matched_rule_ids,
+            result=result,
+            flagged=flagged,
+        )
         return result
