@@ -1,0 +1,4 @@
+Sandbox demo notes
+-------------------
+This is a benign file used to exercise list_files and read_file.
+Nothing sensitive lives here.
