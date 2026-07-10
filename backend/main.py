@@ -292,3 +292,96 @@ async def delete_policy_rule(rule_id: str) -> dict:
         await session.delete(rule)
         await session.commit()
     return {"ok": True}
+
+
+def _approval_to_dict(r: ApprovalRequest) -> dict:
+    return {
+        "id": r.id,
+        "tool_name": r.tool_name,
+        "arguments": r.arguments,
+        "reason": r.reason,
+        "status": r.status,
+        "decided_by": r.decided_by,
+        "created_at": r.created_at.isoformat(),
+        "decided_at": r.decided_at.isoformat() if r.decided_at else None,
+    }
+
+
+async def _fetch_pending_approvals(session) -> list[dict]:
+    """Shared by GET /approvals?status=pending and GET /chat/state (Pitfall
+    5 — a client that connects after a REQUIRE_APPROVAL was already
+    broadcast has no other way to learn about it; WS broadcasts aren't
+    replayed to late joiners)."""
+    rows = (
+        await session.execute(
+            select(ApprovalRequest).where(ApprovalRequest.status == "PENDING").order_by(ApprovalRequest.created_at.desc())
+        )
+    ).scalars().all()
+    return [_approval_to_dict(r) for r in rows]
+
+
+@app.get("/approvals")
+async def list_approvals(status: str = "PENDING") -> list[dict]:
+    async with async_session() as session:
+        if status.upper() == "PENDING":
+            return await _fetch_pending_approvals(session)
+        rows = (
+            await session.execute(
+                select(ApprovalRequest)
+                .where(ApprovalRequest.status == status.upper())
+                .order_by(ApprovalRequest.created_at.desc())
+            )
+        ).scalars().all()
+        return [_approval_to_dict(r) for r in rows]
+
+
+@app.get("/audit/executions")
+async def list_tool_executions(
+    tool_name: str | None = None, decision: str | None = None, limit: int = 200
+) -> list[dict]:
+    # T-03-05: clamp unconditionally — client-supplied limit can only lower,
+    # never raise, the server-side cap (DoS mitigation).
+    effective_limit = min(limit, 200)
+    async with async_session() as session:
+        query = select(ToolExecution).order_by(ToolExecution.created_at.desc()).limit(effective_limit)
+        if tool_name:
+            query = query.where(ToolExecution.tool_name == tool_name)
+        if decision:
+            query = query.where(ToolExecution.decision_action == decision)
+        rows = (await session.execute(query)).scalars().all()
+        return [
+            {
+                "id": r.id,
+                "conversation_id": r.conversation_id,
+                "tool_name": r.tool_name,
+                "arguments": r.arguments,
+                "decision_action": r.decision_action,
+                "decision_reason": r.decision_reason,
+                "matched_rule_ids": r.matched_rule_ids,
+                "result_ok": r.result_ok,
+                "result_error": r.result_error,
+                "flagged_prompt_injection": r.flagged_prompt_injection,
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in rows
+        ]
+
+
+@app.get("/audit/logs")
+async def list_audit_logs(event: str | None = None, limit: int = 200) -> list[dict]:
+    effective_limit = min(limit, 200)
+    async with async_session() as session:
+        query = select(AuditLog).order_by(AuditLog.created_at.desc()).limit(effective_limit)
+        if event:
+            query = query.where(AuditLog.event == event)
+        rows = (await session.execute(query)).scalars().all()
+        return [
+            {
+                "id": r.id,
+                "event": r.event,
+                "detail": r.detail,
+                "flags": r.flags,
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in rows
+        ]
