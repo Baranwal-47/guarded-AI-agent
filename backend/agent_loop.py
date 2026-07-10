@@ -62,14 +62,27 @@ class AgentLoop:
             response_parts = []
             for call in calls:
                 print(f"[TOOL] {call.name} args={call.args!r}")
-                server_name = self.tool_provider.server_for(call.name)
-                result = await self.gateway.execute_tool(
-                    call.name, server_name, call.args, conversation_id, token_usage
-                )
-                # Uniform serialization: the Gateway returns the same ToolResult
-                # shape for ALLOW/DENY/REQUIRE_APPROVAL, so no branch-specific
-                # handling is needed here.
-                result_dict = {"ok": result.ok, "content": result.content, "error": result.error}
+                try:
+                    server_name = self.tool_provider.server_for(call.name)
+                except KeyError:
+                    # The LLM is untrusted even though Gemini is normally constrained
+                    # to the declared tool list - a hallucinated/unknown tool name
+                    # must never crash the turn. Synthesize a failed result so the
+                    # LLM sees it and can recover instead of a raw 500.
+                    print(f"[TOOL] unknown tool requested: {call.name!r}")
+                    result_dict = {
+                        "ok": False,
+                        "content": None,
+                        "error": f"UNKNOWN_TOOL: '{call.name}' is not a registered tool",
+                    }
+                else:
+                    result = await self.gateway.execute_tool(
+                        call.name, server_name, call.args, conversation_id, token_usage
+                    )
+                    # Uniform serialization: the Gateway returns the same ToolResult
+                    # shape for ALLOW/DENY/REQUIRE_APPROVAL, so no branch-specific
+                    # handling is needed here.
+                    result_dict = {"ok": result.ok, "content": result.content, "error": result.error}
                 response_parts.append(self.gemini_client.function_response_part(call.name, result_dict))
 
             contents.append(types.Content(role="user", parts=response_parts))
