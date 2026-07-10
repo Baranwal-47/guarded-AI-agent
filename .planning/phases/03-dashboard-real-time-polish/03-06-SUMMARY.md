@@ -94,3 +94,10 @@ None - no external service configuration required.
 ---
 *Phase: 03-dashboard-real-time-polish*
 *Completed: 2026-07-10*
+
+## Self-Check: PASSED
+
+- FOUND: frontend/src/pages/PoliciesPage.tsx
+- FOUND: .planning/phases/03-dashboard-real-time-polish/03-06-SUMMARY.md
+- FOUND commit: 2113d76
+- FOUND commit: 6262dfe
