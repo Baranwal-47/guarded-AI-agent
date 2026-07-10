@@ -21,7 +21,7 @@ from agent_loop import AgentLoop, ToolCatalog
 from approval_manager import ApprovalManager
 from config import get_settings
 from db import async_session, init_models
-from fastapi import FastAPI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from gateway import ToolExecutionGateway, reconcile_pending_approvals, try_decide
 from gemini_client import GeminiClient
 from google.genai import types
@@ -29,6 +29,7 @@ from mcp_manager import MCPManager
 from models import Conversation, Message, PolicyRule
 from pydantic import BaseModel
 from sqlalchemy import func, select
+from ws_manager import WebSocketManager
 
 
 async def _seed_policy_rules_if_empty(rules_path: str) -> None:
@@ -105,10 +106,15 @@ async def lifespan(app: FastAPI):
     try:
         gemini_client = GeminiClient(settings.gemini_api_key, settings.gemini_model)
         approval_manager = ApprovalManager()
+        ws_manager = WebSocketManager()
         # The Gateway is the ONE component that legitimately holds the manager's
         # privileged execute capability.
         gateway = ToolExecutionGateway(
-            mcp_manager, async_session, approval_manager, timeout_seconds=settings.approval_timeout_seconds
+            mcp_manager,
+            async_session,
+            approval_manager,
+            timeout_seconds=settings.approval_timeout_seconds,
+            broadcast=ws_manager.broadcast,
         )
         # The Agent Loop receives only this read-only facade — never mcp_manager.
         catalog = ToolCatalog(mcp_manager)
@@ -122,6 +128,10 @@ async def lifespan(app: FastAPI):
         app.state.conversation_id = conversation_id
         # Shared with POST /approvals/{id} — same instance the gateway blocks on.
         app.state.approval_manager = approval_manager
+        # Shared with the /ws route — same instance the gateway broadcasts through.
+        app.state.ws_manager = ws_manager
+        # Shared with 03-02's GET /tools route.
+        app.state.catalog = catalog
 
         yield
     finally:
@@ -174,3 +184,15 @@ async def resolve_approval(request_id: str, body: ApprovalDecision) -> dict:
     if won:
         app.state.approval_manager.wake(request_id, body.decision)
     return {"ok": won}
+
+
+@app.websocket("/ws")
+async def ws_endpoint(websocket: WebSocket) -> None:
+    """Dashboard's live event feed — see backend/ws_manager.py for the
+    fan-out invariant and gateway.py for the 8 lifecycle event types."""
+    await app.state.ws_manager.connect(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except WebSocketDisconnect:
+        app.state.ws_manager.disconnect(websocket)
