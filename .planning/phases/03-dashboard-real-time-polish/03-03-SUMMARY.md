@@ -85,3 +85,10 @@ SEC-01 is now backed by a passing, dedicated test set (structural + behavioral) 
 ---
 *Phase: 03-dashboard-real-time-polish*
 *Completed: 2026-07-10*
+
+## Self-Check: PASSED
+
+- FOUND: backend/tests/test_policy_engine.py
+- FOUND: .planning/phases/03-dashboard-real-time-polish/03-03-SUMMARY.md
+- FOUND: aef0789 (test commit)
+- FOUND: 4b1eba0 (docs commit)
