@@ -364,6 +364,42 @@ class ToolExecutionGateway:
                 )
                 return result
 
+            # Re-check policy immediately before executing: an admin may have
+            # blocked/changed the rule while this approval sat pending. Human
+            # approval must not outlive policy (POLICY-05 corollary) — only a
+            # fresh DENY blocks execution here; REQUIRE_APPROVAL still executes
+            # since a human already decided this specific request.
+            async with self.session_factory() as session:
+                fresh_rules = await load_rules(session)
+            post_approval_decision = evaluate(ctx, fresh_rules)
+            if post_approval_decision.action is Action.DENY:
+                reason = f"policy changed while approval was pending (fail-closed DENY): {post_approval_decision.reason}"
+                result = ToolResult(ok=False, content=None, error=reason)
+                await self._persist_tool_execution(
+                    conversation_id=conversation_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    decision_action=Action.DENY.value,
+                    decision_reason=reason,
+                    matched_rule_ids=post_approval_decision.matched_rule_ids,
+                    result=result,
+                    flagged=False,
+                )
+                await self._safe_broadcast(
+                    {
+                        "type": "execution_failed",
+                        "tool_name": tool_name,
+                        "result_ok": False,
+                        "result_error": reason,
+                        "conversation_id": conversation_id,
+                    }
+                )
+                await self._audit(
+                    "execution_failed",
+                    {"tool_name": tool_name, "result_ok": False, "result_error": reason, "conversation_id": conversation_id},
+                )
+                return result
+
         await self._safe_broadcast({"type": "execution_started", "tool_name": tool_name, "conversation_id": conversation_id})
         await self._audit("execution_started", {"tool_name": tool_name, "conversation_id": conversation_id})
 

@@ -18,6 +18,7 @@ guidance), preserving the exact prior fail-closed/executes assertions.
 
 import asyncio
 import inspect
+import sqlite3
 
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -161,6 +162,41 @@ def test_require_approval_affirmative_decision_executes(fake_manager, session_fa
     assert fake_manager.calls == [("write_file", {"path": "x"})]
     assert result.ok is True
     assert result.content == "fake-content"
+
+
+def test_post_approval_recheck_denies_if_policy_changed_while_pending(fake_manager, tmp_path):
+    # Simulates an admin blocking the tool AFTER the approval request was
+    # created but BEFORE it executes: a new enabled DENY rule for the same
+    # tool lands in the DB the instant the (pre-resolved) approval Future
+    # is registered - the gateway must re-check policy before executing an
+    # already-approved call, not just trust the original decision.
+    session_factory = _make_session_factory(tmp_path, DEFAULT_RULES)  # R-APPROVE: require_approval on write_file
+
+    class PolicyMutatingApprovalManager:
+        def register(self, request_id: str) -> asyncio.Future:
+            conn = sqlite3.connect(tmp_path / "gw-test.db")
+            conn.execute(
+                "INSERT INTO policy_rules (id, rule_type, tool_name, condition, action, enabled) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                ("R-NEW-DENY", "block_tool", "write_file", "{}", "DENY", 1),
+            )
+            conn.commit()
+            conn.close()
+            fut = asyncio.get_running_loop().create_future()
+            fut.set_result("approve")
+            return fut
+
+        def wake(self, request_id: str, decision: str) -> None:  # pragma: no cover - never called (pre-resolved)
+            pass
+
+        def discard(self, request_id: str) -> None:
+            pass
+
+    gateway = ToolExecutionGateway(fake_manager, session_factory, PolicyMutatingApprovalManager())
+    result = _run(gateway, "write_file")
+    assert fake_manager.calls == []  # never executed - the fresh DENY won the re-check
+    assert result.ok is False
+    assert "policy changed while approval was pending" in result.error
 
 
 def test_policy_exception_fails_closed_no_mcp_call(fake_manager, session_factory, approval_manager, monkeypatch):
