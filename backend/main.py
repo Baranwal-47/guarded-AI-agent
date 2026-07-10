@@ -21,13 +21,13 @@ from agent_loop import AgentLoop, ToolCatalog
 from approval_manager import ApprovalManager
 from config import get_settings
 from db import async_session, init_models
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from gateway import ToolExecutionGateway, reconcile_pending_approvals, try_decide
 from gemini_client import GeminiClient
 from google.genai import types
 from mcp_manager import MCPManager
-from models import Conversation, Message, PolicyRule
-from pydantic import BaseModel
+from models import ApprovalRequest, AuditLog, Conversation, Message, PolicyRule, ToolExecution
+from pydantic import BaseModel, model_validator
 from sqlalchemy import func, select
 from ws_manager import WebSocketManager
 
@@ -149,6 +149,47 @@ class ApprovalDecision(BaseModel):
     decision: Literal["approve", "reject"]
 
 
+class PolicyRuleCreate(BaseModel):
+    """Validates the condition shape per rule_type at the API boundary,
+    mirroring policy_engine._matches()'s expectations (T-03-04) — a
+    malformed rule is rejected with 422 here instead of only failing,
+    fail-closed, the first time evaluate() hits it."""
+
+    rule_type: Literal["block_tool", "require_approval", "input_validation", "token_budget"]
+    tool_name: str
+    condition: dict = {}
+    action: Literal["ALLOW", "DENY", "REQUIRE_APPROVAL"]
+    enabled: bool = True
+
+    @model_validator(mode="after")
+    def _validate_condition_shape(self) -> "PolicyRuleCreate":
+        if self.rule_type == "input_validation":
+            if not isinstance(self.condition.get("prefix"), str):
+                raise ValueError("input_validation rule requires a string 'prefix' condition field")
+        elif self.rule_type == "token_budget":
+            if not isinstance(self.condition.get("max_tokens"), int):
+                raise ValueError("token_budget rule requires an int 'max_tokens' condition field")
+        elif self.condition:
+            raise ValueError(f"{self.rule_type} rule must have an empty condition")
+        return self
+
+
+class PolicyRuleToggle(BaseModel):
+    enabled: bool
+
+
+def _rule_to_dict(rule: PolicyRule) -> dict:
+    return {
+        "id": rule.id,
+        "policy_id": rule.policy_id,
+        "rule_type": rule.rule_type,
+        "tool_name": rule.tool_name,
+        "condition": rule.condition,
+        "action": rule.action,
+        "enabled": rule.enabled,
+    }
+
+
 async def _persist_message(conversation_id: str, role: str, content: str) -> None:
     async with async_session() as session:
         session.add(Message(conversation_id=conversation_id, role=role, content=content))
@@ -196,3 +237,58 @@ async def ws_endpoint(websocket: WebSocket) -> None:
             await websocket.receive_text()
     except WebSocketDisconnect:
         app.state.ws_manager.disconnect(websocket)
+
+
+@app.get("/tools")
+async def list_tools() -> list[dict]:
+    """D-05: thin read-only wrapper over the existing ToolCatalog — zero new
+    discovery logic, no hardcoded tool names."""
+    return app.state.catalog.list_all_tools()
+
+
+@app.post("/policies/rules")
+async def create_policy_rule(body: PolicyRuleCreate) -> dict:
+    async with async_session() as session:
+        rule = PolicyRule(
+            rule_type=body.rule_type,
+            tool_name=body.tool_name,
+            condition=body.condition,
+            action=body.action,
+            enabled=body.enabled,
+        )
+        session.add(rule)
+        await session.commit()
+        return {"id": rule.id}
+
+
+@app.get("/policies/rules")
+async def list_policy_rules() -> list[dict]:
+    # ponytail: PolicyRule has no created_at column, so there's no
+    # chronological ordering to sort by here; D-08 groups by tool_name
+    # client-side anyway, so insertion order is not load-bearing.
+    async with async_session() as session:
+        rows = (await session.execute(select(PolicyRule))).scalars().all()
+        return [_rule_to_dict(r) for r in rows]
+
+
+@app.patch("/policies/rules/{rule_id}")
+async def toggle_policy_rule(rule_id: str, body: PolicyRuleToggle) -> dict:
+    """D-07: toggle only — no route edits tool_name/condition/action."""
+    async with async_session() as session:
+        rule = await session.get(PolicyRule, rule_id)
+        if rule is None:
+            raise HTTPException(status_code=404, detail="rule not found")
+        rule.enabled = body.enabled
+        await session.commit()
+    return {"ok": True}
+
+
+@app.delete("/policies/rules/{rule_id}")
+async def delete_policy_rule(rule_id: str) -> dict:
+    async with async_session() as session:
+        rule = await session.get(PolicyRule, rule_id)
+        if rule is None:
+            raise HTTPException(status_code=404, detail="rule not found")
+        await session.delete(rule)
+        await session.commit()
+    return {"ok": True}
