@@ -53,39 +53,69 @@ def _text_content(result) -> str:
     return "\n".join(block.text for block in result.content if hasattr(block, "text"))
 
 
+@dataclass(frozen=True)
+class ServerSpec:
+    """One MCP server to connect to. Adding a server = appending one ServerSpec
+    to _default_server_specs() (or passing a custom list to MCPManager()) - no
+    other code changes, as long as its transport is one of the two already
+    supported below. A genuinely new transport type needs one new branch in
+    `_connect_transport`, same as any MCP client would."""
+
+    name: str
+    transport: str  # "stdio" | "streamable_http"
+    stdio_params: StdioServerParameters | None = None
+    http_url: str | None = None
+
+
+def _default_server_specs() -> list[ServerSpec]:
+    return [
+        ServerSpec(
+            name="sandbox",
+            transport="stdio",
+            stdio_params=StdioServerParameters(
+                command="uv", args=["run", "python", "server.py"], cwd=str(_SANDBOX_SERVER_DIR)
+            ),
+        ),
+        ServerSpec(name="context7", transport="streamable_http", http_url=_CONTEXT7_URL),
+    ]
+
+
 class MCPManager:
     """Connects to every configured MCP server, builds the live tool registry, executes calls."""
 
-    def __init__(self) -> None:
+    def __init__(self, server_specs: list[ServerSpec] | None = None) -> None:
+        self._specs = server_specs or _default_server_specs()
         self._stack = AsyncExitStack()
         self._sessions: dict[str, ClientSession] = {}
         self._tool_to_server: dict[str, str] = {}
         self._tool_schemas: dict[str, dict] = {}
         self._tool_descriptions: dict[str, str] = {}
 
+    async def _connect_transport(self, spec: ServerSpec, settings) -> ClientSession:
+        """Transport-adapter dispatch - config in, live ClientSession out."""
+        if spec.transport == "stdio":
+            read, write = await self._stack.enter_async_context(stdio_client(spec.stdio_params))
+        elif spec.transport == "streamable_http":
+            headers = {"CONTEXT7_API_KEY": settings.context7_api_key} if settings.context7_api_key else None
+            http_client = create_mcp_http_client(headers=headers)
+            read, write, _get_session_id = await self._stack.enter_async_context(
+                streamable_http_client(spec.http_url, http_client=http_client)
+            )
+        else:
+            raise ValueError(f"unknown transport '{spec.transport}' for server '{spec.name}'")
+        return await self._stack.enter_async_context(ClientSession(read, write))
+
     async def connect_all(self) -> None:
-        """Connect every server, discover its tools, and populate the registry. Call once at startup."""
+        """Connect every configured server, discover its tools, and populate the
+        registry. Call once at startup."""
         loop_name = type(asyncio.get_event_loop()).__name__
         print(f"[MCP] event loop: {loop_name}", file=sys.stderr)  # Pitfall 1: confirm ProactorEventLoop on Windows
 
         settings = get_settings()
-
-        sandbox_params = StdioServerParameters(
-            command="uv", args=["run", "python", "server.py"], cwd=str(_SANDBOX_SERVER_DIR)
-        )
-        sandbox_read, sandbox_write = await self._stack.enter_async_context(stdio_client(sandbox_params))
-        sandbox_session = await self._stack.enter_async_context(ClientSession(sandbox_read, sandbox_write))
-        await sandbox_session.initialize()
-        self._sessions["sandbox"] = sandbox_session
-
-        headers = {"CONTEXT7_API_KEY": settings.context7_api_key} if settings.context7_api_key else None
-        http_client = create_mcp_http_client(headers=headers)
-        context7_read, context7_write, _get_session_id = await self._stack.enter_async_context(
-            streamable_http_client(_CONTEXT7_URL, http_client=http_client)
-        )
-        context7_session = await self._stack.enter_async_context(ClientSession(context7_read, context7_write))
-        await context7_session.initialize()
-        self._sessions["context7"] = context7_session
+        for spec in self._specs:
+            session = await self._connect_transport(spec, settings)
+            await session.initialize()
+            self._sessions[spec.name] = session
 
         for server_name, session in self._sessions.items():
             tools = await session.list_tools()
