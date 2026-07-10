@@ -367,6 +367,30 @@ async def list_tool_executions(
         ]
 
 
+@app.get("/chat/state")
+async def chat_state() -> dict:
+    """D-04: the Agent page calls this on mount and on every WS reconnect so
+    a dropped connection during a long approval wait never strands the page
+    on stale state."""
+    async with async_session() as session:
+        pending_approvals = await _fetch_pending_approvals(session)
+        recent_rows = (
+            await session.execute(
+                select(Message)
+                .where(Message.conversation_id == app.state.conversation_id)
+                .order_by(Message.created_at.desc())
+                .limit(20)
+            )
+        ).scalars().all()
+    return {
+        "pending_approvals": pending_approvals,
+        "recent_messages": [
+            {"role": m.role, "content": m.content, "created_at": m.created_at.isoformat()}
+            for m in reversed(recent_rows)
+        ],
+    }
+
+
 @app.get("/audit/logs")
 async def list_audit_logs(event: str | None = None, limit: int = 200) -> list[dict]:
     effective_limit = min(limit, 200)
