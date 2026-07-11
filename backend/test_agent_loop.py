@@ -55,6 +55,9 @@ class FakeGeminiClient:
         self.response_parts_fed.append((name, response))
         return types.Part.from_function_response(name=name, response=response)
 
+    def total_tokens(self, response: FakeResponse) -> int:
+        return 0
+
 
 class FakeMCPManagerForCatalog:
     """Backs ToolCatalog with a fixed name -> server_name registry."""
@@ -96,7 +99,7 @@ def test_unknown_tool_call_does_not_crash_and_feeds_back_synthesized_error():
     )
     loop = AgentLoop(gemini, gateway, catalog, max_steps=5)
 
-    final_text, _contents = asyncio.run(loop.run_turn(contents=[], conversation_id="c1", token_usage=0))
+    final_text, _contents, _token_usage = asyncio.run(loop.run_turn(contents=[], conversation_id="c1", token_usage=0))
 
     assert final_text == "recovered answer"
     assert gateway.calls == []  # unknown tool never reaches the gateway/MCP layer
@@ -121,7 +124,7 @@ def test_known_tool_call_still_routes_through_gateway_normally():
     )
     loop = AgentLoop(gemini, gateway, catalog, max_steps=5)
 
-    final_text, _contents = asyncio.run(loop.run_turn(contents=[], conversation_id="c1", token_usage=0))
+    final_text, _contents, _token_usage = asyncio.run(loop.run_turn(contents=[], conversation_id="c1", token_usage=0))
 
     assert final_text == "final answer"
     assert gateway.calls == [("read_file", "sandbox", {"path": "notes.txt"})]

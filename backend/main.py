@@ -23,12 +23,12 @@ from config import get_settings
 from db import async_session, init_models
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from gateway import ToolExecutionGateway, reconcile_pending_approvals, try_decide
-from gemini_client import GeminiClient
+from gemini_client import GeminiClient, LLMUnavailableError
 from google.genai import types
 from mcp_manager import MCPManager
 from models import ApprovalRequest, AuditLog, Conversation, Message, PolicyRule, ToolExecution
 from pydantic import BaseModel, model_validator
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from ws_manager import WebSocketManager
 
 
@@ -58,7 +58,7 @@ async def _seed_policy_rules_if_empty(rules_path: str) -> None:
         print(f"[STARTUP] seeded {len(rules)} policy rules")
 
 
-async def _load_or_create_conversation() -> tuple[list, str]:
+async def _load_or_create_conversation() -> tuple[list, str, int]:
     """Eager-load the single ongoing conversation's full history into a
     `contents` list, entirely inside one session scope (Pitfall 5 — no lazy
     relationship traversal, no access after the session closes).
@@ -80,7 +80,7 @@ async def _load_or_create_conversation() -> tuple[list, str]:
             )
         ).scalars().all()
         contents = [types.Content(role=m.role, parts=[types.Part.from_text(text=m.content)]) for m in rows]
-        return contents, conversation.id
+        return contents, conversation.id, conversation.token_usage
 
 
 async def _reconcile_startup_approvals() -> None:
@@ -120,12 +120,13 @@ async def lifespan(app: FastAPI):
         catalog = ToolCatalog(mcp_manager)
         agent_loop = AgentLoop(gemini_client, gateway, tool_provider=catalog, max_steps=settings.max_agent_steps)
 
-        contents, conversation_id = await _load_or_create_conversation()
+        contents, conversation_id, token_usage = await _load_or_create_conversation()
         print(f"[STARTUP] Resumed conversation {conversation_id}: {len(contents)} prior messages loaded")
 
         app.state.agent_loop = agent_loop
         app.state.contents = contents
         app.state.conversation_id = conversation_id
+        app.state.token_usage = token_usage
         # Shared with POST /approvals/{id} — same instance the gateway blocks on.
         app.state.approval_manager = approval_manager
         # Shared with the /ws route — same instance the gateway broadcasts through.
@@ -155,7 +156,7 @@ class PolicyRuleCreate(BaseModel):
     malformed rule is rejected with 422 here instead of only failing,
     fail-closed, the first time evaluate() hits it."""
 
-    rule_type: Literal["block_tool", "require_approval", "input_validation", "token_budget"]
+    rule_type: Literal["allow_tool", "block_tool", "require_approval", "input_validation", "token_budget"]
     tool_name: str
     condition: dict = {}
     action: Literal["ALLOW", "DENY", "REQUIRE_APPROVAL"]
@@ -196,21 +197,62 @@ async def _persist_message(conversation_id: str, role: str, content: str) -> Non
         await session.commit()
 
 
+async def _persist_token_usage(conversation_id: str, token_usage: int) -> None:
+    async with async_session() as session:
+        conversation = await session.get(Conversation, conversation_id)
+        conversation.token_usage = token_usage
+        await session.commit()
+
+
+async def _persist_llm_failure(conversation_id: str, detail: str) -> None:
+    async with async_session() as session:
+        session.add(AuditLog(event="llm_unavailable", detail={"conversation_id": conversation_id, "error": detail}))
+        await session.commit()
+
+
 @app.post("/chat")
 async def chat(body: ChatRequest) -> dict:
     app.state.contents.append(types.Content(role="user", parts=[types.Part.from_text(text=body.message)]))
     await _persist_message(app.state.conversation_id, "user", body.message)
 
-    final_text, app.state.contents = await app.state.agent_loop.run_turn(
-        app.state.contents, app.state.conversation_id, token_usage=0
-    )
+    try:
+        final_text, app.state.contents, app.state.token_usage = await app.state.agent_loop.run_turn(
+            app.state.contents, app.state.conversation_id, app.state.token_usage
+        )
+    except LLMUnavailableError as exc:
+        # The user's turn stays persisted (it's a real message they sent); no
+        # assistant reply is persisted for a turn the LLM never completed.
+        # Next turn's contents will carry the dangling user message forward —
+        # Gemini handles a stray unanswered user turn fine.
+        await _persist_llm_failure(app.state.conversation_id, str(exc))
+        raise HTTPException(status_code=503, detail=f"LLM temporarily unavailable: {exc}") from exc
 
     # ponytail: persist only the completed turn (user text + assistant final
     # text) — a turn finishes inside one synchronous /chat call (D-02), so
     # mid-turn tool-call crash recovery is out of scope this phase.
     await _persist_message(app.state.conversation_id, "model", final_text)
+    await _persist_token_usage(app.state.conversation_id, app.state.token_usage)
 
     return {"final_text": final_text}
+
+
+@app.delete("/chat")
+async def clear_chat() -> dict:
+    """Wipes the single ongoing conversation's persisted messages and tool-call
+    history, and resets in-memory state (contents, token_usage) so a restart
+    resumes empty instead of replaying stale rows (T-02-02's single-
+    conversation design has no separate "new chat" concept, so clearing means
+    resetting this one). AuditLog is a separate, permanent security trail and
+    is deliberately left untouched."""
+    async with async_session() as session:
+        await session.execute(delete(Message).where(Message.conversation_id == app.state.conversation_id))
+        await session.execute(delete(ToolExecution).where(ToolExecution.conversation_id == app.state.conversation_id))
+        conversation = await session.get(Conversation, app.state.conversation_id)
+        conversation.token_usage = 0
+        await session.commit()
+    app.state.contents = []
+    app.state.token_usage = 0
+    return {"ok": True}
 
 
 @app.post("/approvals/{request_id}")
@@ -371,7 +413,11 @@ async def list_tool_executions(
 async def chat_state() -> dict:
     """D-04: the Agent page calls this on mount and on every WS reconnect so
     a dropped connection during a long approval wait never strands the page
-    on stale state."""
+    on stale state. Also the only way a (re)mounted Agent page recovers
+    already-resolved tool-call blocks — the live WS stream only reaches
+    whichever tab is open at the moment a gateway event fires, so a page that
+    mounts after the fact (e.g. navigating back from Approvals) has no other
+    way to learn a tool call happened."""
     async with async_session() as session:
         pending_approvals = await _fetch_pending_approvals(session)
         recent_rows = (
@@ -382,12 +428,34 @@ async def chat_state() -> dict:
                 .limit(20)
             )
         ).scalars().all()
+        recent_tool_calls = (
+            await session.execute(
+                select(ToolExecution)
+                .where(ToolExecution.conversation_id == app.state.conversation_id)
+                .order_by(ToolExecution.created_at.desc())
+                .limit(20)
+            )
+        ).scalars().all()
     return {
         "pending_approvals": pending_approvals,
         "recent_messages": [
             {"role": m.role, "content": m.content, "created_at": m.created_at.isoformat()}
             for m in reversed(recent_rows)
         ],
+        "recent_tool_calls": [
+            {
+                "tool_name": r.tool_name,
+                "arguments": r.arguments,
+                "decision_action": r.decision_action,
+                "decision_reason": r.decision_reason,
+                "matched_rule_ids": r.matched_rule_ids,
+                "result_ok": r.result_ok,
+                "result_error": r.result_error,
+                "created_at": r.created_at.isoformat(),
+            }
+            for r in reversed(recent_tool_calls)
+        ],
+        "token_usage": app.state.token_usage,
     }
 
 

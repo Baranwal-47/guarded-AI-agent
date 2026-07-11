@@ -9,7 +9,14 @@ execution only ever happens through `gateway.ToolExecutionGateway` (01-04).
 """
 
 from google import genai
-from google.genai import types
+from google.genai import errors, types
+
+
+class LLMUnavailableError(Exception):
+    """The Gemini API itself failed (quota exhausted, rate limit, outage,
+    transient network error) — as opposed to the model successfully
+    responding. A turn-level failure, never routed through the policy engine
+    or Gateway (Pitfall 5): this has nothing to do with tool-call guardrails."""
 
 
 class GeminiClient:
@@ -35,15 +42,22 @@ class GeminiClient:
 
     def generate(self, contents: list, tool: types.Tool) -> types.GenerateContentResponse:
         """Propose the next turn. Automatic function calling is ALWAYS disabled (AGENT-02) —
-        this method never receives an MCP transport handle; the gateway is the only executor."""
-        return self.client.models.generate_content(
-            model=self.model,
-            contents=contents,
-            config=types.GenerateContentConfig(
-                tools=[tool],
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
-            ),
-        )
+        this method never receives an MCP transport handle; the gateway is the only executor.
+
+        Raises LLMUnavailableError (never the raw SDK exception) on any API-level
+        failure (quota/rate-limit/outage) so callers have one exception type to
+        handle regardless of which of Google's error subclasses fired."""
+        try:
+            return self.client.models.generate_content(
+                model=self.model,
+                contents=contents,
+                config=types.GenerateContentConfig(
+                    tools=[tool],
+                    automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=True),
+                ),
+            )
+        except errors.APIError as exc:
+            raise LLMUnavailableError(f"Gemini API error {exc.code} ({exc.status}): {exc.message}") from exc
 
     @staticmethod
     def function_calls(response: types.GenerateContentResponse) -> list:
@@ -53,6 +67,13 @@ class GeminiClient:
     @staticmethod
     def text(response: types.GenerateContentResponse) -> str | None:
         return response.text
+
+    @staticmethod
+    def total_tokens(response: types.GenerateContentResponse) -> int:
+        """Tokens billed for this single generate_content call (prompt + candidates),
+        used to accumulate PolicyContext.current_token_usage per conversation."""
+        usage = response.usage_metadata
+        return usage.total_token_count if usage and usage.total_token_count else 0
 
     @staticmethod
     def function_response_part(name: str, response: dict) -> types.Part:

@@ -18,6 +18,9 @@ class Conversation(Base):
 
     id: Mapped[str] = mapped_column(primary_key=True, default=lambda: str(uuid4()))
     created_at: Mapped[datetime] = mapped_column(default=datetime.utcnow)
+    # Cumulative real Gemini usage_metadata across every turn (T-04 token_budget) —
+    # durable so a restart resumes the true total, not zero.
+    token_usage: Mapped[int] = mapped_column(default=0)
 
 
 class Message(Base):

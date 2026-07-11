@@ -43,11 +43,17 @@ class AgentLoop:
         self.tool_provider = tool_provider
         self.max_steps = max_steps
 
-    async def run_turn(self, contents: list, conversation_id: str, token_usage: int) -> tuple[str, list]:
-        """Run one user turn to completion. Returns (final_text, updated_contents)."""
+    async def run_turn(self, contents: list, conversation_id: str, token_usage: int) -> tuple[str, list, int]:
+        """Run one user turn to completion. Returns (final_text, updated_contents, updated_token_usage).
+
+        token_usage accumulates the conversation's real Gemini usage_metadata
+        (T-04 token_budget) — updated after every generate() call, including
+        mid-turn, so a token_budget rule sees usage accrued earlier in this
+        same turn before later tool calls in it are evaluated."""
         for step in range(1, self.max_steps + 1):
             tool = self.gemini_client.build_tools(self.tool_provider.list_all_tools())
             response = self.gemini_client.generate(contents, tool)
+            token_usage += self.gemini_client.total_tokens(response)
             print(f"[STEP {step}]")
 
             calls = self.gemini_client.function_calls(response)
@@ -57,7 +63,7 @@ class AgentLoop:
             # later generate() calls (bug found during Task 3 live verification).
             contents.append(response.candidates[0].content)
             if not calls:
-                return self.gemini_client.text(response), contents
+                return self.gemini_client.text(response), contents, token_usage
 
             response_parts = []
             for call in calls:
@@ -91,6 +97,7 @@ class AgentLoop:
         # the turn always terminates (D-11, AGENT-01).
         tool = self.gemini_client.build_tools(self.tool_provider.list_all_tools())
         final_response = self.gemini_client.generate(contents, tool)
+        token_usage += self.gemini_client.total_tokens(final_response)
         contents.append(final_response.candidates[0].content)
         final_text = self.gemini_client.text(final_response) or "[capped: max steps reached without a final answer]"
-        return final_text, contents
+        return final_text, contents, token_usage

@@ -64,22 +64,68 @@ function reducer(state: TranscriptEntry[], action: TranscriptAction): Transcript
   }
 }
 
-/** Reconciles the authoritative GET /chat/state snapshot into transcript entries (Pitfall 2: replace, don't append). */
+type Timestamped<T> = T & { created_at: string };
+
+/** Reconciles the authoritative GET /chat/state snapshot into transcript entries (Pitfall 2: replace, don't append).
+ *
+ * Rebuilds tool_requested/policy_decided/execution_result blocks from
+ * `recent_tool_calls` too, not just user/model messages — otherwise every
+ * remount (nav away and back, WS reconnect) wiped the visual record of a
+ * tool call that already resolved, even though it genuinely ran. */
 function entriesFromChatState(state: ChatState): TranscriptEntry[] {
-  const messageEntries: TranscriptEntry[] = state.recent_messages.map((m, i) => ({
+  const messageEntries: Timestamped<TranscriptEntry>[] = state.recent_messages.map((m, i) => ({
     kind: m.role === "user" ? "user" : "model",
     id: `msg-${i}-${m.created_at}`,
     content: m.content,
+    created_at: m.created_at,
   }));
-  const approvalEntries: TranscriptEntry[] = state.pending_approvals.map((a) => ({
+
+  const toolEntries: Timestamped<TranscriptEntry>[] = state.recent_tool_calls.flatMap((t, i) => {
+    const base = `tool-${i}-${t.created_at}`;
+    const entries: Timestamped<TranscriptEntry>[] = [
+      {
+        kind: "tool_requested",
+        id: `${base}-req`,
+        tool_name: t.tool_name,
+        arguments: t.arguments,
+        created_at: t.created_at,
+      },
+      {
+        kind: "policy_decided",
+        id: `${base}-decide`,
+        tool_name: t.tool_name,
+        action: t.decision_action,
+        reason: t.decision_reason,
+        matched_rule_ids: t.matched_rule_ids,
+        created_at: t.created_at,
+      },
+    ];
+    if (t.result_ok !== null) {
+      entries.push({
+        kind: "execution_result",
+        id: `${base}-result`,
+        tool_name: t.tool_name,
+        ok: t.result_ok,
+        error: t.result_error ?? undefined,
+        created_at: t.created_at,
+      });
+    }
+    return entries;
+  });
+
+  const approvalEntries: Timestamped<TranscriptEntry>[] = state.pending_approvals.map((a) => ({
     kind: "approval",
     id: a.id,
     tool_name: a.tool_name,
     arguments: a.arguments,
     reason: a.reason,
     status: "pending",
+    created_at: a.created_at,
   }));
-  return [...messageEntries, ...approvalEntries];
+
+  return [...messageEntries, ...toolEntries, ...approvalEntries].sort((a, b) =>
+    a.created_at.localeCompare(b.created_at)
+  );
 }
 
 export function AgentPage() {
@@ -88,6 +134,8 @@ export function AgentPage() {
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [initialLoading, setInitialLoading] = useState(true);
+  const [tokenUsage, setTokenUsage] = useState(0);
   const idCounter = useRef(0);
   const bottomRef = useRef<HTMLDivElement>(null);
   const nextId = () => `e-${idCounter.current++}`;
@@ -96,8 +144,11 @@ export function AgentPage() {
     try {
       const state = await api.get<ChatState>("/chat/state");
       dispatch({ type: "reconcile", entries: entriesFromChatState(state) });
+      setTokenUsage(state.token_usage);
     } catch {
       // Best-effort hydration; a failed re-fetch leaves the existing transcript in place.
+    } finally {
+      setInitialLoading(false);
     }
   }, []);
 
@@ -181,6 +232,17 @@ export function AgentPage() {
     bottomRef.current?.scrollIntoView({ block: "end" });
   }, [transcript.length]);
 
+  async function handleClear() {
+    if (sending) return;
+    try {
+      await api.delete("/chat");
+      dispatch({ type: "reconcile", entries: [] });
+      setTokenUsage(0);
+    } catch {
+      setError("Couldn't clear the conversation. Try again.");
+    }
+  }
+
   async function handleSend(e: FormEvent) {
     e.preventDefault();
     const text = input.trim();
@@ -192,8 +254,8 @@ export function AgentPage() {
     try {
       const res = await api.post<{ final_text: string }>("/chat", { message: text });
       dispatch({ type: "add", entry: { kind: "model", id: nextId(), content: res.final_text } });
-    } catch {
-      setError("Something went wrong processing that message. Try sending it again.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Something went wrong processing that message. Try sending it again.");
     } finally {
       setSending(false);
     }
@@ -201,10 +263,27 @@ export function AgentPage() {
 
   return (
     <div className="flex h-[calc(100vh-4rem)] flex-col">
-      <h1 className="text-xl font-semibold text-zinc-50">Agent</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-xl font-semibold text-zinc-50">Agent</h1>
+        <div className="flex items-center gap-3">
+          <span className="text-xs text-zinc-500">Tokens used: {tokenUsage.toLocaleString()}</span>
+          <button
+            type="button"
+            onClick={handleClear}
+            disabled={sending || transcript.length === 0}
+            className="rounded border border-zinc-800 px-3 py-1 text-xs text-zinc-400 hover:text-zinc-50 disabled:opacity-50"
+          >
+            Clear chat
+          </button>
+        </div>
+      </div>
 
       <div className="mt-4 flex-1 overflow-y-auto rounded bg-zinc-900 p-4">
-        {transcript.length === 0 ? (
+        {initialLoading ? (
+          <div className="mt-8 text-center">
+            <p className="text-sm text-zinc-400">Loading conversation…</p>
+          </div>
+        ) : transcript.length === 0 ? (
           <div className="mt-8 text-center">
             <h2 className="text-base font-semibold text-zinc-50">No messages yet</h2>
             <p className="mt-1 text-sm text-zinc-400">Send a message to start the conversation.</p>

@@ -3,10 +3,11 @@ import { api } from "../api/client";
 import type { Action, PolicyRule, Tool } from "../api/types";
 import { DecisionBadge } from "../components/DecisionBadge";
 
-const RULE_TYPES = ["block_tool", "require_approval", "input_validation", "token_budget"] as const;
+const RULE_TYPES = ["allow_tool", "block_tool", "require_approval", "input_validation", "token_budget"] as const;
 type RuleType = (typeof RULE_TYPES)[number];
 
 const ACTION_BY_RULE_TYPE: Record<RuleType, Action> = {
+  allow_tool: "ALLOW",
   block_tool: "DENY",
   require_approval: "REQUIRE_APPROVAL",
   input_validation: "DENY",

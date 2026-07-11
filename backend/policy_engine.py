@@ -85,7 +85,7 @@ async def load_rules(session: "AsyncSession") -> list[Rule]:
 def _matches(rule: Rule, ctx: PolicyContext) -> bool:
     if rule.tool_name != ctx.tool_name:
         return False
-    if rule.rule_type in ("block_tool", "require_approval"):
+    if rule.rule_type in ("allow_tool", "block_tool", "require_approval"):
         return True
     if rule.rule_type == "input_validation":
         arg_name = rule.condition.get("arg", "path")

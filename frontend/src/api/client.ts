@@ -6,7 +6,11 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     headers: { "Content-Type": "application/json", ...init?.headers },
   });
   if (!res.ok) {
-    throw new Error(`${init?.method ?? "GET"} ${path} failed: ${res.status}`);
+    const detail = await res
+      .json()
+      .then((body) => body?.detail as string | undefined)
+      .catch(() => undefined);
+    throw new Error(detail ?? `${init?.method ?? "GET"} ${path} failed: ${res.status}`);
   }
   if (res.status === 204) return undefined as T;
   return res.json() as Promise<T>;

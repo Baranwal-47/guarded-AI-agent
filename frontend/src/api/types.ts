@@ -79,7 +79,20 @@ export interface ChatMessage {
   created_at: string;
 }
 
+export interface ChatToolCall {
+  tool_name: string;
+  arguments: Record<string, unknown>;
+  decision_action: Action;
+  decision_reason: string;
+  matched_rule_ids: string[];
+  result_ok: boolean | null;
+  result_error: string | null;
+  created_at: string;
+}
+
 export interface ChatState {
   pending_approvals: ApprovalRequest[];
   recent_messages: ChatMessage[];
+  recent_tool_calls: ChatToolCall[];
+  token_usage: number;
 }

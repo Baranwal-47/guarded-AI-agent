@@ -49,9 +49,9 @@ class FakeAgentLoop:
     def __init__(self, final_text: str = "fake final answer") -> None:
         self.final_text = final_text
 
-    async def run_turn(self, contents: list, conversation_id: str, token_usage: int) -> tuple[str, list]:
+    async def run_turn(self, contents: list, conversation_id: str, token_usage: int) -> tuple[str, list, int]:
         contents.append(types.Content(role="model", parts=[types.Part.from_text(text=self.final_text)]))
-        return self.final_text, contents
+        return self.final_text, contents, token_usage
 
 
 @pytest.fixture(scope="module")
