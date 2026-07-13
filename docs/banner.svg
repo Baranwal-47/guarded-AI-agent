@@ -1,0 +1,55 @@
+<svg width="880" height="200" viewBox="0 0 880 200" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0d1117"/>
+      <stop offset="55%" stop-color="#101725"/>
+      <stop offset="100%" stop-color="#0d1421"/>
+    </linearGradient>
+    <linearGradient id="rule" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#3fb950"/>
+      <stop offset="50%" stop-color="#58a6ff"/>
+      <stop offset="100%" stop-color="#bc8cff"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="880" height="200" fill="url(#bg)"/>
+
+  <!-- shield watermark motif, right side -->
+  <g transform="translate(760, 30)" opacity="0.16">
+    <path d="M50 0 L100 22 L100 70 Q100 118 50 140 Q0 118 0 70 L0 22 Z"
+          fill="none" stroke="#58a6ff" stroke-width="3"/>
+    <path d="M50 14 L88 31 L88 68 Q88 106 50 124 Q12 106 12 68 L12 31 Z"
+          fill="none" stroke="#3fb950" stroke-width="2"/>
+    <path d="M30 68 L45 84 L72 48" fill="none" stroke="#3fb950" stroke-width="6"
+          stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+
+  <!-- faint grid dots, left -->
+  <g fill="#58a6ff" opacity="0.10">
+    <circle cx="30" cy="30" r="2"/><circle cx="60" cy="30" r="2"/><circle cx="90" cy="30" r="2"/>
+    <circle cx="30" cy="55" r="2"/><circle cx="60" cy="55" r="2"/>
+    <circle cx="30" cy="80" r="2"/>
+  </g>
+
+  <text x="48" y="78" font-family="Segoe UI, Helvetica, Arial, sans-serif"
+        font-size="40" font-weight="700" fill="#e6edf3">Guarded AI Agent</text>
+
+  <text x="48" y="110" font-family="Segoe UI, Helvetica, Arial, sans-serif"
+        font-size="16" fill="#8b949e">Every LLM tool call through one fail-closed policy gateway — live rules, human approvals, full audit trail</text>
+
+  <rect x="48" y="128" width="700" height="3" rx="1.5" fill="url(#rule)"/>
+
+  <text x="48" y="162" font-family="Cascadia Mono, Consolas, monospace" font-size="15">
+    <tspan fill="#bc8cff">Gemini agent</tspan>
+    <tspan fill="#6e7681"> ─▶ </tspan>
+    <tspan fill="#58a6ff">Gateway</tspan>
+    <tspan fill="#6e7681"> ─▶ </tspan>
+    <tspan fill="#3fb950">PolicyEngine</tspan>
+    <tspan fill="#6e7681"> ─▶ </tspan>
+    <tspan fill="#d29922">approve / deny</tspan>
+    <tspan fill="#6e7681"> ─▶ </tspan>
+    <tspan fill="#39c5cf">MCP tools</tspan>
+  </text>
+
+  <text x="48" y="184" font-family="Cascadia Mono, Consolas, monospace" font-size="12" fill="#6e7681">FastAPI · Gemini · MCP · React · SQLite — 51 tests, zero paths around the gateway</text>
+</svg>
