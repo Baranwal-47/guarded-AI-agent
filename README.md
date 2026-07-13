@@ -23,6 +23,22 @@ Browser (React) ── WebSocket + REST ──▶ FastAPI backend
 
 ---
 
+## See it in action
+
+One real conversation, every guardrail outcome. `list_files` is allowed by an explicit rule, `write_file` is frozen mid-turn until a human approves it, `delete_file` is denied by rule precedence (`DENY > REQUIRE_APPROVAL`), and a context7 tool with no matching rule is denied by the fail-closed default — all with live policy blocks in the chat and real Gemini token usage in the header:
+
+![Agent page — live policy decisions inline in the chat, real token usage](docs/screenshots/agent-page.png)
+
+A `write_file` call caught by a `require_approval` rule, blocked mid-turn and streaming live — the agent cannot proceed until a human decides (or a 5-minute timer auto-denies):
+
+![A tool call blocked pending human approval, streamed live](docs/screenshots/require-approval-live.png)
+
+A tool call with no matching rule, denied by the fail-closed default — not a crash, not an implicit allow:
+
+![Fail-closed DENY with no matching rule](docs/screenshots/deny-fail-closed.png)
+
+---
+
 ## Why it's built this way
 
 The one architectural rule everything else follows: **the agent loop can never reach tool execution directly.** `AgentLoop` holds only a read-only `ToolCatalog` facade (schema/name lookup) and a `Gateway` reference — it never imports `MCPManager` and never calls `.call()` on it. Every proposed tool call, no matter what the LLM decided, is forced through `ToolExecutionGateway.execute_tool()`, which is the only code path allowed to invoke `MCPManager.call()`. That's what makes "an LLM can't bypass its guardrails" true in the code, not just a convention.
@@ -171,9 +187,7 @@ Every branch writes a `tool_executions` row (decision, reason, matched rule ids,
 Four pages, all backed by REST + one shared WebSocket for live events (auto-reconnect with exponential backoff, re-hydrates state from the server on every reconnect so a dropped connection during a long approval wait never stranded the page).
 
 ### Agent
-Chat UI. Streams `tool_requested` → `policy_decided` → `approval_required`/`execution_result` as separate live blocks while a turn runs — not just the final answer. On mount or reconnect, rebuilds the **full** transcript (messages *and* already-resolved tool-call blocks) from `GET /chat/state`, so navigating away mid-approval and back doesn't erase the visual record of what the agent actually did. Shows live cumulative token usage; "Clear chat" wipes the conversation's messages and tool-call history from SQLite (and resets token usage) so a restart doesn't replay stale state.
-
-![Agent page](docs/screenshots/agent-page.png)
+Chat UI. Streams `tool_requested` → `policy_decided` → `approval_required`/`execution_result` as separate live blocks while a turn runs — not just the final answer. On mount or reconnect, rebuilds the **full** transcript (messages *and* already-resolved tool-call blocks) from `GET /chat/state`, so navigating away mid-approval and back doesn't erase the visual record of what the agent actually did. Shows live cumulative token usage; "Clear chat" wipes the conversation's messages and tool-call history from SQLite (and resets token usage) so a restart doesn't replay stale state. (Screenshots at the [top of this README](#see-it-in-action).)
 
 ### Policies
 CRUD for guardrail rules, grouped by tool. Rule type drives the fixed action for `allow_tool`/`block_tool`/`require_approval`; `input_validation`/`token_budget` additionally take a condition (prefix+arg, or max_tokens) and let you choose DENY vs REQUIRE_APPROVAL. Toggle enable/disable or delete a rule — takes effect on the agent's next tool call, no restart.
@@ -189,16 +203,6 @@ Live list of `PENDING` approval requests with Approve/Reject actions; re-fetches
 Two tabs: **Tool Executions** (every tool call with its decision, reason, matched rules, and result — filterable by tool/decision) and **Audit Log** (the full lifecycle event stream, including `llm_unavailable` and prompt-injection flags), both filterable and capped server-side at 200 rows regardless of client-requested limit.
 
 ![Audit Logs page](docs/screenshots/audit-logs-page.png)
-
-### It in action
-
-Guardrails enforcing in real time during actual use — a tool call requiring approval, waiting live:
-
-![A tool call blocked pending human approval, streamed live](docs/screenshots/require-approval-live.png)
-
-A tool call with no matching rule, denied by the fail-closed default (not a crash, not an implicit allow):
-
-![Fail-closed DENY with no matching rule](docs/screenshots/deny-fail-closed.png)
 
 ---
 
